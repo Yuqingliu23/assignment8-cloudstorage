@@ -1,0 +1,29 @@
+# python
+*.py[cod]
+__pycache__/
+build/
+dist/
+eggs/
+.tox/
+# pytest
+.pytest_cache/
+htmlcov/
+.coverage
+.env
+*.log
+# os specific
+.DS_Store
+Thumbs.db
+# backup files
+*~
+#editor-specific
+.vscode/
+*.swp
+*.swo
+# compild or generated files
+*.o
+*.out
+# temporary files and directories
+*.tmp
+temp/
+tmp/
