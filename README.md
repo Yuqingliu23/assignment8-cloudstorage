@@ -1,15 +1,15 @@
-Assignment8-CloudStorage
+# Assignment8-CloudStorage
 
 This repository will build an EC2 image that contains a mysql server with an mysql-backup shell script.  When executed, the shell script will take a snapshot of an example mysql database and table (in this case the recommend.movies table), and save the snapshot to an S3 bucket. The shell script can be run on-demand or as a periodic cron job for regular backups. 
 
 The repository is designed to build via the command-line using the stand-alone packer tools. This is not currently configured to use terraform or GitHub actions, only the packer tool from the command line and to demostrate the elements of using S3.  This script is not compatible with Assignment 4/5 webapp as-is, as it would need to modified to work with attaching your EBS volume. 
 
-Prerequsites: 
+## Prerequsites 
 
 On the development host:
 packer 
 
-On AWS:
+### On AWS
 vpc, public subnet and sg setup for an AWS region
 
 This script uses environment variables as the source for passwords and secrets, so your shell should have the following variables set on your development host (e.g. export <variable>=<value>) :
@@ -23,10 +23,10 @@ Note that the AWS access/secret that you use should allows S3 access.
 
 To execute packer on the development host:
 
-$packer build --var="mysql_user=${MYSQL_USER}"  --var="mysql_password=${MYSQL_PASS}" --var="aws_access_key_id=${AWS_ACCESS_KEY_ID}"  --var="aws_secret_access_key=${AWS_SECRET_ACCESS_KEY}"  mysql_backup.json.pkr.hcl
+> $packer build --var="mysql_user=${MYSQL_USER}"  --var="mysql_password=${MYSQL_PASS}" --var="aws_access_key_id=${AWS_ACCESS_KEY_ID}"  --var="aws_secret_access_key=${AWS_SECRET_ACCESS_KEY}"  mysql_backup.json.pkr.hcl
 
 
-The components:
+## Manifest
 
 mysql_backup.json.pkr.hcl - The packer HCL file.  This will create an AMI image with mysql-server and the backup script installed.  Once the AMI is created, you can ssh into the instance to run the backup.   This file needs to be configured  with  aws region, instance type, source_ami and s3 bucket name that you want to use. 
 
