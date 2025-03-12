@@ -34,25 +34,25 @@ variable "s3_backup_bucket" {
 variable "mysql_user" {
     type = string
     sensitive = true
-    default = "dummy_user"  # 仅用于测试，实际使用时应通过命令行参数提供
+    default = "dummy_user"  
 }
 
 variable "mysql_password" {
     type = string
     sensitive = true
-    default = "dummy_password"  # 仅用于测试，实际使用时应通过命令行参数提供
+    default = "dummy_password"  
 }
 
 variable "aws_access_key_id" {
     type = string
     sensitive = true
-    default = "dummy_access_key"  # 仅用于测试，实际使用时应通过命令行参数提供
+    default = "dummy_access_key"  
 }
 
 variable "aws_secret_access_key" {
     type = string
     sensitive = true
-    default = "dummy_secret_key"  # 仅用于测试，实际使用时应通过命令行参数提供
+    default = "dummy_secret_key"  
 }
 
 
