@@ -1,0 +1,340 @@
+name: MySQL Backup CI/CD
+
+on:
+  push:
+    branches: [ assignment8, assignment8 ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to deploy to'
+        required: true
+        default: 'dev'
+        type: choice
+        options:
+          - assignment8
+
+env:
+  AWS_REGION: us-west-2
+  S3_BUCKET: ${{ secrets.S3_BACKUP_BUCKET }}
+  DB_HOST: ${{ secrets.DB_HOST }}
+  DB_PORT: ${{ secrets.DB_PORT }}
+  DB_NAME: ${{ secrets.DB_NAME }}
+  DB_TABLES: ${{ secrets.DB_TABLES }}
+  RETENTION_DAYS: ${{ secrets.RETENTION_DAYS }}
+
+jobs:
+  validate:
+    name: Validate Scripts
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Validate shell scripts
+        run: |
+          find . -name "*.sh" -type f -exec bash -n {} \;
+          if [ $? -ne 0 ]; then
+            echo "Shell script validation failed"
+            exit 1
+          fi
+
+      - name: Validate Packer configuration
+        run: |
+          curl -fsSL https://apt.releases.hashicorp.com/gpg | sudo apt-key add -
+          sudo apt-add-repository "deb [arch=amd64] https://apt.releases.hashicorp.com $(lsb_release -cs) main"
+          sudo apt-get update && sudo apt-get install packer
+          # 初始化 Packer 插件
+          packer init mysql_backup.json.pkr.hcl
+          packer validate mysql_backup.json.pkr.hcl
+
+  test:
+    name: Test Backup Script
+    runs-on: ubuntu-latest
+    needs: validate
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up MySQL
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mysql-server mysql-client
+          sudo systemctl start mysql
+          sudo mysql -e "CREATE USER 'testuser'@'localhost' IDENTIFIED BY 'testpassword';"
+          sudo mysql -e "GRANT ALL PRIVILEGES ON *.* TO 'testuser'@'localhost';"
+          sudo mysql -e "FLUSH PRIVILEGES;"
+          
+          # Create test database
+          sudo mysql -e "CREATE DATABASE ${{ env.DB_NAME || 'recommend1' }};"
+          sudo mysql -e "CREATE TABLE ${{ env.DB_NAME || 'recommend1' }}.${{ env.DB_TABLES || 'movies' }} (id INT, title VARCHAR(255));"
+          sudo mysql -e "INSERT INTO ${{ env.DB_NAME || 'recommend1' }}.${{ env.DB_TABLES || 'movies' }} VALUES (1, 'Test Movie');"
+          
+          # Configure MySQL credentials with custom host if provided
+          cat << EOF > ~/.my.cnf
+          [client]
+          user="testuser"
+          password="testpassword"
+          host=${{ env.DB_HOST || 'localhost' }}
+          port=${{ env.DB_PORT || '3306' }}
+          EOF
+          chmod 600 ~/.my.cnf
+
+      - name: Install AWS CLI
+        run: |
+          curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+          unzip awscliv2.zip
+          sudo ./aws/install
+          mkdir -p ~/.aws
+          
+          # Configure AWS credentials (using dummy values for testing)
+          cat << EOF > ~/.aws/credentials
+          [default]
+          aws_access_key_id=dummy_key
+          aws_secret_access_key=dummy_secret
+          EOF
+          
+          cat << EOF > ~/.aws/config
+          [default]
+          region=us-west-2
+          output=json
+          EOF
+
+      - name: Create test config
+        run: |
+          mkdir -p backups
+          cat << EOF > config.sh
+          #!/bin/bash
+          # Test Configuration
+          export MYSQL_S3_BUCKET="${{ env.S3_BUCKET || 'test-bucket' }}"
+          export DB_HOST="${{ env.DB_HOST || 'localhost' }}"
+          export DB_PORT="${{ env.DB_PORT || '3306' }}"
+          export DB_NAME="${{ env.DB_NAME || 'recommend1' }}"
+          export DB_TABLES="${{ env.DB_TABLES || 'movies' }}"
+          export RETENTION_DAYS="${{ env.RETENTION_DAYS || '1' }}"
+          EOF
+
+      - name: Test backup script (mock S3 upload)
+        run: |
+          # Mock aws s3 cp command to always succeed
+          mkdir -p ~/.local/bin
+          cat << EOF > ~/.local/bin/aws
+          #!/bin/bash
+          if [[ "\$1" == "s3" && "\$2" == "cp" ]]; then
+            echo "Mock S3 upload successful"
+            exit 0
+          else
+            /usr/local/bin/aws "\$@"
+          fi
+          EOF
+          chmod +x ~/.local/bin/aws
+          export PATH=~/.local/bin:$PATH
+          
+          # Run backup script
+          bash ./backup_mysql.sh
+          
+          # Verify backup file was created
+          if ls backups/*.sql.gz 1> /dev/null 2>&1; then
+            echo "Backup file created successfully"
+          else
+            echo "Backup file creation failed"
+            exit 1
+          fi
+
+  build-ami:
+    name: Build AMI with Packer
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Install Packer
+        run: |
+          curl -fsSL https://apt.releases.hashicorp.com/gpg | sudo apt-key add -
+          sudo apt-add-repository "deb [arch=amd64] https://apt.releases.hashicorp.com $(lsb_release -cs) main"
+          sudo apt-get update && sudo apt-get install packer
+          # 初始化 Packer 插件
+          packer init mysql_backup.json.pkr.hcl
+
+      - name: Create sample data for testing
+        run: |
+          mkdir -p data
+          echo "Sample data" | gzip > data/recommend.sql.gz
+
+      - name: Update config.sh with environment variables
+        run: |
+          cat << EOF > config.sh
+          #!/bin/bash
+          # MySQL Backup Configuration File
+          
+          # S3 Bucket Configuration
+          export MYSQL_S3_BUCKET="${{ env.S3_BUCKET }}"
+          
+          # Database Configuration
+          export DB_HOST="${{ env.DB_HOST || 'localhost' }}"
+          export DB_PORT="${{ env.DB_PORT || '3306' }}"
+          export DB_NAME="${{ env.DB_NAME || 'recommend1' }}"
+          export DB_TABLES="${{ env.DB_TABLES || 'movies' }}"
+          
+          # Backup Configuration
+          export RETENTION_DAYS="${{ env.RETENTION_DAYS || '7' }}"
+          export BACKUP_BASE_DIR="/var/backup/mysql/"
+          export LOG_BASE_DIR="/var/log"
+          export MIN_BACKUP_SIZE=1024  # Minimum expected backup size in bytes
+          
+          # S3 Configuration
+          export S3_MAX_RETRIES=3
+          export S3_STORAGE_CLASS="STANDARD"
+          EOF
+
+      - name: Update setup-mysql.sh for database connection
+        run: |
+          cat << EOF > scripts/setup-mysql.sh
+          #!/bin/bash
+          sudo apt-get update
+          sudo apt-get install -y mysql-server mysql-client unzip curl
+          
+          # install 
+          sudo systemctl start mysql
+          sudo mysql -e "ALTER USER '\${MYSQL_USER}'@'localhost' IDENTIFIED WITH mysql_native_password BY '\${MYSQL_PASS}';"
+          sudo mysql -e "FLUSH PRIVILEGES;"
+          
+          #  save encrypt credentials in .my.cnf (for mysqldump) 
+          cat << EOT > ~/.my.cnf
+          [client]
+          user="\${MYSQL_USER}"
+          password="\${MYSQL_PASS}"
+          host=\${DB_HOST:-localhost}
+          port=\${DB_PORT:-3306}
+          EOT
+          
+          chmod 600 ~/.my.cnf
+          
+          #  import example database (movies table only to keep the size down)
+          gunzip -c recommend.sql.gz | mysql 
+          
+          # installing aws cli (for S3) 
+          curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+          unzip awscliv2.zip
+          sudo ./aws/install
+          mkdir -p .aws
+          
+          # install the aws credentials and config for aws cli to work. 
+          cat << EOT > ~/.aws/credentials
+          [default]
+          aws_access_key_id=\${AWS_ACCESS_KEY_ID} 
+          aws_secret_access_key=\${AWS_SECRET_ACCESS_KEY} 
+          EOT
+          
+          cat << EOT > ~/.aws/config
+          [default]
+          region=us-west-2
+          output=json
+          EOT
+          
+          cat << EOT > ~/config.sh
+          export MYSQL_S3_BUCKET=\${S3_BUCKET}
+          export DB_HOST=\${DB_HOST:-localhost}
+          export DB_PORT=\${DB_PORT:-3306}
+          export DB_NAME=\${DB_NAME:-recommend1}
+          export DB_TABLES=\${DB_TABLES:-movies}
+          export RETENTION_DAYS=\${RETENTION_DAYS:-1}
+          EOT
+          
+          echo "all done"
+          EOF
+          chmod +x scripts/setup-mysql.sh
+
+      - name: Build AMI with Packer
+        run: |
+          packer build \
+            -var "aws_region=${{ env.AWS_REGION }}" \
+            -var "s3_backup_bucket=${{ env.S3_BUCKET }}" \
+            -var "mysql_user=${{ secrets.MYSQL_USER }}" \
+            -var "mysql_password=${{ secrets.MYSQL_PASSWORD }}" \
+            -var "aws_access_key_id=${{ secrets.AWS_ACCESS_KEY_ID }}" \
+            -var "aws_secret_access_key=${{ secrets.AWS_SECRET_ACCESS_KEY }}" \
+            -var "db_host=${{ env.DB_HOST }}" \
+            -var "db_port=${{ env.DB_PORT }}" \
+            -var "db_name=${{ env.DB_NAME }}" \
+            -var "db_tables=${{ env.DB_TABLES }}" \
+            -var "retention_days=${{ env.RETENTION_DAYS }}" \
+            mysql_backup.json.pkr.hcl
+
+  deploy-s3-bucket:
+    name: Deploy S3 Bucket Configuration
+    runs-on: ubuntu-latest
+    needs: validate
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Create S3 bucket if not exists
+        run: |
+          if ! aws s3api head-bucket --bucket ${{ env.S3_BUCKET }} 2>/dev/null; then
+            aws s3api create-bucket \
+              --bucket ${{ env.S3_BUCKET }} \
+              --region ${{ env.AWS_REGION }} \
+              --create-bucket-configuration LocationConstraint=${{ env.AWS_REGION }}
+          
+            echo "S3 bucket created: ${{ env.S3_BUCKET }}"
+          else
+            echo "S3 bucket already exists: ${{ env.S3_BUCKET }}"
+          fi
+
+      - name: Configure S3 bucket lifecycle policy
+        run: |
+          cat << EOF > lifecycle-policy.json
+          {
+            "Rules": [
+              {
+                "ID": "DeleteOldBackups",
+                "Status": "Enabled",
+                "Prefix": "",
+                "Expiration": {
+                  "Days": 30
+                }
+              }
+            ]
+          }
+          EOF
+          
+          aws s3api put-bucket-lifecycle-configuration \
+            --bucket ${{ env.S3_BUCKET }} \
+            --lifecycle-configuration file://lifecycle-policy.json
+          
+          echo "S3 bucket lifecycle policy configured"
+
+      - name: Configure S3 bucket encryption
+        run: |
+          aws s3api put-bucket-encryption \
+            --bucket ${{ env.S3_BUCKET }} \
+            --server-side-encryption-configuration '{
+              "Rules": [
+                {
+                  "ApplyServerSideEncryptionByDefault": {
+                    "SSEAlgorithm": "AES256"
+                  }
+                }
+              ]
+            }'
+          
+          echo "S3 bucket encryption configured"
